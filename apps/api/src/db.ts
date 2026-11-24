@@ -323,6 +323,19 @@ export async function migrate(): Promise<void> {
     ALTER TABLE importers ADD COLUMN IF NOT EXISTS ein_key_version INTEGER REFERENCES field_encryption_key_versions(key_version);
 
     -- #318: regulatory compliance flags
+    CREATE TABLE IF NOT EXISTS oracle_price_feed (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      importer_id UUID REFERENCES importers(id) ON DELETE SET NULL,
+      set_by TEXT NOT NULL,
+      value NUMERIC(20, 2) NOT NULL,
+      source TEXT NOT NULL DEFAULT 'oracle',
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_oracle_price_feed_importer ON oracle_price_feed(importer_id);
+    CREATE INDEX IF NOT EXISTS idx_oracle_price_feed_recorded ON oracle_price_feed(recorded_at);
+
     CREATE TABLE IF NOT EXISTS compliance_flags (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
       surety_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

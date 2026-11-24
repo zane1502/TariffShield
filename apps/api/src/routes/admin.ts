@@ -64,6 +64,73 @@ adminRouter.get("/roles", requireRole("surety_admin"), (_req: Request, res: Resp
   });
 });
 
+// #341 — GET /admin/oracle-feed — oracle price feeds with importer_id/from/to filters and pagination
+adminRouter.get(
+  "/oracle-feed",
+  requireRole("surety_admin"),
+  async (req: Request, res: Response) => {
+    const importerId = req.query.importer_id as string | undefined;
+    const from = req.query.from as string | undefined;
+    const to = req.query.to as string | undefined;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    // Build WHERE clause dynamically with parameterized values
+    let whereSql = "";
+    let countSql = "";
+    const values: unknown[] = [];
+    let paramCount = 0;
+
+    if (importerId) {
+      whereSql += `oi.importer_id = $${++paramCount}, `;
+      countSql += `oi.importer_id = $${++paramCount}, `;
+      values.push(importerId);
+    }
+
+    if (from) {
+      whereSql += `oracle_price_feed.recorded_at >= $${++paramCount}, `;
+      countSql += `oracle_price_feed.recorded_at >= $${++paramCount}, `;
+      values.push(new Date(from));
+    }
+
+    if (to) {
+      whereSql += `oracle_price_feed.recorded_at <= $${++paramCount}, `;
+      countSql += `oracle_price_feed.recorded_at <= $${++paramCount}, `;
+      values.push(new Date(to));
+    }
+
+    // Remove trailing comma and space
+    if (paramCount > 0) {
+      whereSql = whereSql.slice(0, -2);
+      countSql = countSql.slice(0, -2);
+    }
+
+    const fullWhereSql = whereSql ? `WHERE ${whereSql}` : "";
+    const fullCountSql = countSql ? `WHERE ${countSql}` : "";
+
+    // Count total matching rows
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM oracle_price_feed oi ${fullCountSql}`,
+      values.length > 0 ? values.slice(0, paramCount) : undefined
+    );
+    const total = parseInt(countResult.rows[0]?.count || "0");
+
+    // Fetch paginated rows
+    const query = `SELECT oi.*, u.email AS importer_email FROM oracle_price_feed oi LEFT JOIN importers i ON i.id = oi.importer_id LEFT JOIN users u ON u.id = i.user_id ${fullWhereSql} ORDER BY oi.recorded_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    const pageValues = [...values, limit, offset];
+
+    const result = await pool.query(query, pageValues);
+
+    res.json({
+      data: result.rows,
+      total,
+      limit,
+      offset,
+      page: Math.ceil(total / limit) || 1,
+    });
+  }
+);
+
 // #322 — POST /admin/privacy-policy/publish — publish a new privacy policy version
 adminRouter.post(
   "/privacy-policy/publish",
@@ -102,4 +169,68 @@ adminRouter.post(
 
     res.status(201).json({ version: result.rows[0] });
   },
+);
+
+// #342 — GET /admin/oracle-feed/export.csv — export oracle price feeds as CSV (RFC 4180)
+adminRouter.get(
+  "/oracle-feed/export.csv",
+  requireRole("surety_admin"),
+  async (req: Request, res: Response) => {
+    const importerId = req.query.importer_id as string | undefined;
+    const from = req.query.from as string | undefined;
+    const to = req.query.to as string | undefined;
+
+    // Build WHERE clause dynamically with parameterized values
+    let whereSql = "";
+    const values: unknown[] = [];
+    let paramCount = 0;
+
+    if (importerId) {
+      whereSql += `oi.importer_id = $${++paramCount}, `;
+      values.push(importerId);
+    }
+
+    if (from) {
+      whereSql += `oracle_price_feed.recorded_at >= $${++paramCount}, `;
+      values.push(new Date(from));
+    }
+
+    if (to) {
+      whereSql += `oracle_price_feed.recorded_at <= $${++paramCount}, `;
+      values.push(new Date(to));
+    }
+
+    if (paramCount > 0) {
+      whereSql = whereSql.slice(0, -2);
+    }
+
+    const fullWhereSql = whereSql ? `WHERE ${whereSql}` : "";
+
+    // Fetch all matching rows
+    const query = `SELECT oi.set_by, oi.value, oi.recorded_at FROM oracle_price_feed oi ${fullWhereSql} ORDER BY oi.recorded_at DESC`;
+    const results = await pool.query(query, values);
+
+    // Build CSV content per RFC 4180
+    function escapeCsvField(field: string): string {
+      if (field.includes(",") || field.includes('"') || field.includes("\n")) {
+        return `"${field.replace(/"/, '""')}"`;
+      }
+      return field;
+    }
+
+    const header = "set_by,value,recorded_at";
+    const rows: string[] = [header];
+
+    for (const row of results.rows) {
+      const setBy = escapeCsvField(row.set_by ?? "");
+      const value = escapeCsvField(row.value?.toString() ?? "");
+      const recordedAt = escapeCsvField(row.recorded_at?.toISOString() ?? "");
+      rows.push(`${setBy},${value},${recordedAt}`);
+    }
+
+    const csvContent = rows.join("\n");
+    res.header("Content-Type", "text/csv");
+    res.attachment("oracle-price-feed.csv");
+    res.send(csvContent);
+  }
 );
